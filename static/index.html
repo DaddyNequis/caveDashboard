@@ -1,0 +1,273 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#0e0f11">
+<title>Cave Dashboard</title>
+<style>
+  :root {
+    --bg: #0e0f11; --panel: #17191c; --line: #26292e; --text: #e8e9eb; --muted: #8b9098;
+    --accent: #f2a33a; --accent-ink: #1a1206; --ok: #4cc38a; --err: #ef6461; --warn: #e3b341;
+    --r: 12px;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); color: var(--text);
+    font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 640px; margin: 0 auto; padding: 20px 16px 48px; }
+  header { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 20px; }
+  h1 { font-size: 18px; margin: 0; letter-spacing: .02em; }
+  h1 span { color: var(--accent); }
+  .host { color: var(--muted); font-size: 13px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  h1 { flex-shrink: 0; }
+  h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin: 28px 0 10px; font-weight: 600; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--r); padding: 16px; }
+
+  .now { display: grid; gap: 6px; }
+  .now .row { display: flex; align-items: center; gap: 10px; }
+  .pill { font-size: 12px; font-weight: 600; padding: 3px 10px; border-radius: 99px; background: var(--line); color: var(--muted); white-space: nowrap; }
+  .pill.playing { background: rgba(76,195,138,.15); color: var(--ok); }
+  .pill.idle { background: var(--line); color: var(--muted); }
+  .pill.error { background: rgba(239,100,97,.15); color: var(--err); }
+  .now .url { word-break: break-all; font-size: 14px; }
+  .now .meta { color: var(--muted); font-size: 13px; }
+  .now .err { color: var(--err); font-size: 13px; }
+
+  form { display: grid; gap: 14px; }
+  input[type=url], select { width: 100%; background: var(--bg); color: var(--text); border: 1px solid var(--line);
+    border-radius: 10px; padding: 12px 14px; font: inherit; outline: none; }
+  input[type=url]:focus, select:focus { border-color: var(--accent); }
+  .seg { display: grid; grid-template-columns: repeat(3, 1fr); background: var(--bg); border: 1px solid var(--line); border-radius: 10px; padding: 3px; }
+  .seg input { display: none; }
+  .seg label { text-align: center; padding: 8px 0; border-radius: 8px; cursor: pointer; color: var(--muted); font-size: 14px; }
+  .seg input:checked + label { background: var(--line); color: var(--text); }
+  .hint { color: var(--muted); font-size: 13px; margin-top: -6px; min-height: 1.2em; }
+  .opts { display: flex; gap: 20px; flex-wrap: wrap; }
+  .opts label { display: flex; align-items: center; gap: 8px; cursor: pointer; }
+  input[type=checkbox] { accent-color: var(--accent); width: 18px; height: 18px; }
+
+  .actions { display: flex; gap: 10px; flex-wrap: wrap; }
+  button { font: inherit; font-weight: 600; border-radius: 10px; padding: 11px 18px; cursor: pointer;
+    border: 1px solid var(--line); background: var(--panel); color: var(--text); }
+  button:hover { border-color: #3a3e45; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); flex: 1; }
+  button.danger { color: var(--err); }
+  button:disabled { opacity: .5; cursor: wait; }
+
+  ul.history { list-style: none; margin: 0; padding: 0; }
+  ul.history li { display: flex; align-items: center; gap: 10px; padding: 10px 0; border-top: 1px solid var(--line); }
+  ul.history li:first-child { border-top: 0; padding-top: 0; }
+  ul.history li:last-child { padding-bottom: 0; }
+  ul.history .h-url { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
+  ul.history .h-url:hover { color: var(--accent); }
+  ul.history .tag { font-size: 11px; color: var(--muted); border: 1px solid var(--line); border-radius: 6px; padding: 1px 6px; }
+  ul.history .del { background: none; border: 0; color: var(--muted); padding: 4px 8px; font-size: 18px; line-height: 1; }
+  ul.history .del:hover { color: var(--err); }
+  .empty { color: var(--muted); font-size: 14px; }
+
+  .settings { display: grid; gap: 14px; }
+  .settings .field { display: grid; grid-template-columns: 1fr minmax(110px, 160px); align-items: center; gap: 12px; }
+  input[type=range] { width: 100%; accent-color: var(--accent); }
+  .muted { color: var(--muted); font-size: 13px; }
+
+  .toast { position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%) translateY(80px); background: var(--text); color: var(--bg);
+    padding: 10px 16px; border-radius: 10px; font-weight: 600; transition: transform .2s; max-width: calc(100% - 32px); }
+  .toast.show { transform: translateX(-50%) translateY(0); }
+  .toast.err { background: var(--err); color: #fff; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Cave <span>Dashboard</span></h1>
+    <div class="host" id="host"></div>
+  </header>
+
+  <section class="card now">
+    <div class="row"><span class="pill" id="pill">…</span><span class="meta" id="since"></span></div>
+    <div class="url" id="nowUrl">Conectando…</div>
+    <div class="err" id="nowErr" hidden></div>
+  </section>
+
+  <h2>Mostrar en pantalla</h2>
+  <form class="card" id="form">
+    <input type="url" id="url" placeholder="https://youtube.com/watch?v=…  ·  https://…/video.mp4  ·  https://mi-dashboard" required autocomplete="off" inputmode="url">
+    <div class="seg" role="radiogroup">
+      <input type="radio" name="mode" id="m-auto" value="auto" checked><label for="m-auto">Auto</label>
+      <input type="radio" name="mode" id="m-web" value="web"><label for="m-web">Página web</label>
+      <input type="radio" name="mode" id="m-video" value="video"><label for="m-video">Vídeo</label>
+    </div>
+    <div class="hint" id="hint"></div>
+    <div class="opts">
+      <label><input type="checkbox" id="loop" checked> Repetir vídeo</label>
+      <label><input type="checkbox" id="mute"> Sin sonido</label>
+    </div>
+    <div class="actions">
+      <button type="submit" class="primary" id="go">Mostrar</button>
+      <button type="button" id="reload" title="Vuelve a abrir lo actual">Recargar</button>
+      <button type="button" id="stop">Detener</button>
+    </div>
+  </form>
+
+  <h2>Recientes</h2>
+  <div class="card"><ul class="history" id="history"></ul></div>
+
+  <h2>Ajustes</h2>
+  <div class="card settings">
+    <div class="field">
+      <div>Calidad máxima de vídeo<div class="muted">La Pi Zero W va fluida hasta 720p</div></div>
+      <select id="maxh">
+        <option value="360">360p</option><option value="480">480p</option>
+        <option value="720">720p</option><option value="1080">1080p</option>
+      </select>
+    </div>
+    <div class="field">
+      <div>Volumen <span class="muted" id="volv"></span></div>
+      <input type="range" id="vol" min="0" max="130" step="5">
+    </div>
+    <div class="muted">Se aplica al siguiente vídeo que se reproduzca.</div>
+  </div>
+
+  <h2>Sistema</h2>
+  <div class="card actions">
+    <button type="button" id="reboot">Reiniciar Pi</button>
+    <button type="button" class="danger" id="poweroff">Apagar</button>
+  </div>
+</main>
+<div class="toast" id="toast"></div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let state = null, settingsDirty = false;
+
+const VIDEO_HOSTS = ["youtube.com", "youtu.be", "youtube-nocookie.com", "vimeo.com", "twitch.tv", "dailymotion.com"];
+const VIDEO_EXT = /\.(mp4|m4v|mkv|webm|mov|avi|ts|m3u8|mpd|mp3|m4a|aac|ogg|opus|flac|wav)$/i;
+
+function detect(raw) {
+  try {
+    const u = new URL(raw.includes("://") ? raw : "https://" + raw);
+    if (/^(rtsps?|rtmps?|srt|udp):$/.test(u.protocol)) return "video";
+    const h = u.hostname.toLowerCase();
+    if (VIDEO_HOSTS.some(v => h === v || h.endsWith("." + v))) return "video";
+    if (VIDEO_EXT.test(u.pathname)) return "video";
+    return "web";
+  } catch { return null; }
+}
+
+function toast(msg, err) {
+  const t = $("toast");
+  t.textContent = msg; t.className = "toast show" + (err ? " err" : "");
+  clearTimeout(toast.t); toast.t = setTimeout(() => t.className = "toast" + (err ? " err" : ""), 2600);
+}
+
+async function api(path, body) {
+  const res = await fetch(path, body === undefined ? {} : {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || res.statusText);
+  return data;
+}
+
+function ago(ts) {
+  const s = Math.max(0, Date.now() / 1000 - ts);
+  if (s < 60) return "hace unos segundos";
+  if (s < 3600) return `hace ${Math.floor(s / 60)} min`;
+  if (s < 86400) return `hace ${Math.floor(s / 3600)} h`;
+  return `hace ${Math.floor(s / 86400)} d`;
+}
+
+function render(s) {
+  state = s;
+  const p = s.player;
+  $("host").textContent = `${s.hostname} · ${s.ip || "sin red"}${s.port === 80 ? "" : ":" + s.port}`;
+
+  const pill = $("pill");
+  const labels = { video: "Vídeo", web: "Web", idle: "En espera" };
+  pill.className = "pill " + (p.status === "error" ? "error" : p.kind === "idle" ? "idle" : "playing");
+  pill.textContent = p.status === "error" ? "Error" : labels[p.kind] || "…";
+  $("since").textContent = p.since ? ago(p.since) : "";
+  $("nowUrl").textContent = p.kind === "idle" || !s.current ? "Nada configurado — la pantalla muestra la IP." : s.current.url;
+  $("nowErr").hidden = !p.error; $("nowErr").textContent = p.error || "";
+
+  const ul = $("history");
+  ul.replaceChildren();
+  if (!s.history.length) {
+    const li = document.createElement("li"); li.className = "empty"; li.textContent = "Aún no has mostrado nada.";
+    ul.append(li);
+  }
+  for (const h of s.history) {
+    const li = document.createElement("li");
+    const url = document.createElement("span"); url.className = "h-url"; url.textContent = h.url; url.title = "Mostrar ahora";
+    url.onclick = () => show(h);
+    const tag = document.createElement("span"); tag.className = "tag";
+    tag.textContent = h.mode === "auto" ? (detect(h.url) === "video" ? "vídeo" : "web") : h.mode === "video" ? "vídeo" : "web";
+    const del = document.createElement("button"); del.className = "del"; del.textContent = "×"; del.title = "Quitar";
+    del.onclick = async () => { render(await api("/api/history/delete", { url: h.url })); };
+    li.append(url, tag, del); ul.append(li);
+  }
+
+  if (!settingsDirty) {
+    $("maxh").value = s.settings.max_height;
+    $("vol").value = s.settings.volume; $("volv").textContent = s.settings.volume + "%";
+  }
+}
+
+async function refresh() {
+  try { render(await api("/api/status")); } catch { $("pill").className = "pill error"; $("pill").textContent = "Sin conexión"; }
+}
+
+async function show(item) {
+  const btn = $("go"); btn.disabled = true;
+  try {
+    render(await api("/api/show", item));
+    toast((item.mode === "video" || (item.mode === "auto" && detect(item.url) === "video"))
+      ? "Cargando vídeo… (YouTube puede tardar ~20 s)" : "Abriendo página…");
+  } catch (e) { toast(e.message, true); }
+  finally { btn.disabled = false; }
+}
+
+function updateHint() {
+  const mode = document.querySelector("input[name=mode]:checked").value;
+  const raw = $("url").value.trim();
+  if (mode !== "auto" || !raw) { $("hint").textContent = ""; return; }
+  const d = detect(raw);
+  $("hint").textContent = d ? `Se abrirá como ${d === "video" ? "vídeo (mpv)" : "página web (navegador)"}` : "";
+}
+
+$("url").addEventListener("input", updateHint);
+document.querySelectorAll("input[name=mode]").forEach(r => r.addEventListener("change", updateHint));
+
+$("form").addEventListener("submit", (e) => {
+  e.preventDefault();
+  show({
+    url: $("url").value.trim(),
+    mode: document.querySelector("input[name=mode]:checked").value,
+    loop: $("loop").checked, mute: $("mute").checked,
+  });
+});
+
+$("stop").onclick = async () => { try { render(await api("/api/stop", {})); toast("Detenido"); } catch (e) { toast(e.message, true); } };
+$("reload").onclick = async () => { try { render(await api("/api/reload", {})); toast("Recargando…"); } catch (e) { toast(e.message, true); } };
+
+async function saveSettings(patch) {
+  try { settingsDirty = false; render(await api("/api/settings", patch)); toast("Guardado"); }
+  catch (e) { toast(e.message, true); }
+}
+$("maxh").onchange = () => saveSettings({ max_height: +$("maxh").value });
+$("vol").oninput = () => { settingsDirty = true; $("volv").textContent = $("vol").value + "%"; };
+$("vol").onchange = () => saveSettings({ volume: +$("vol").value });
+
+for (const action of ["reboot", "poweroff"]) {
+  $(action).onclick = async () => {
+    if (!confirm(action === "reboot" ? "¿Reiniciar la Raspberry Pi?" : "¿Apagar la Raspberry Pi?")) return;
+    try { await api("/api/system", { action }); toast(action === "reboot" ? "Reiniciando…" : "Apagando…"); }
+    catch (e) { toast(e.message, true); }
+  };
+}
+
+refresh();
+setInterval(refresh, 3000);
+</script>
+</body>
+</html>

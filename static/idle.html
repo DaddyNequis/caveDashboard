@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<title>Cave Dashboard</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; color: #e8e9eb; cursor: none; overflow: hidden;
+    font-family: system-ui, "DejaVu Sans", sans-serif; }
+  body { display: grid; place-items: center; text-align: center; }
+  .clock { font-size: 18vh; font-weight: 200; letter-spacing: .02em; line-height: 1; }
+  .title { font-size: 3vh; color: #f2a33a; letter-spacing: .3em; text-transform: uppercase; margin-top: 4vh; }
+  .url { font-size: 4.5vh; margin-top: 1.5vh; font-weight: 600; }
+  .sub { font-size: 2.4vh; color: #8b9098; margin-top: 1vh; }
+  .err { font-size: 2.2vh; color: #ef6461; margin-top: 4vh; max-width: 80vw; }
+</style>
+</head>
+<body>
+<div>
+  <div class="clock" id="clock"></div>
+  <div class="title">Cave Dashboard</div>
+  <div class="url" id="url">Buscando red…</div>
+  <div class="sub">Abre esta dirección para elegir qué mostrar</div>
+  <div class="err" id="err"></div>
+</div>
+<script>
+  function tick() {
+    const d = new Date();
+    document.getElementById("clock").textContent =
+      String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0");
+  }
+  async function poll() {
+    try {
+      const s = await (await fetch("/api/status")).json();
+      document.getElementById("url").textContent = s.ip
+        ? "http://" + s.ip + (s.port === 80 ? "" : ":" + s.port)
+        : "Sin conexión de red";
+      document.getElementById("err").textContent = s.player.error || "";
+    } catch {}
+  }
+  tick(); poll();
+  setInterval(tick, 1000);
+  setInterval(poll, 5000);
+</script>
+</body>
+</html>
