@@ -564,8 +564,9 @@ def main():
         player.shutdown()
         threading.Thread(target=httpd.shutdown, daemon=True).start()
 
-    signal.signal(signal.SIGTERM, stop)
-    signal.signal(signal.SIGINT, stop)
+    # xinit sends SIGHUP when X goes away: clean up children in every case.
+    for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        signal.signal(sig, stop)
 
     log(f"Cave Dashboard on http://{local_ip() or 'localhost'}:{PORT}  (browser: {player.browser})")
     threading.Thread(target=update_ytdlp, daemon=True).start()

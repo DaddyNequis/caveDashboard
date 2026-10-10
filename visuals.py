@@ -377,6 +377,7 @@ class Window:
         x.XStoreName.argtypes = [vp, C.c_ulong, C.c_char_p]
         x.XMapWindow.argtypes = [vp, C.c_ulong]
         x.XFlush.argtypes = [vp]
+        x.XPending.argtypes = [vp]
 
         self.dpy = x.XOpenDisplay(None)
         if not self.dpy:
@@ -424,6 +425,10 @@ class Window:
         self.egl.eglQuerySurface(self.edpy, self.surf, EGL_WIDTH, C.byref(w))
         self.egl.eglQuerySurface(self.edpy, self.surf, EGL_HEIGHT, C.byref(h))
         return w.value, h.value
+
+    def alive(self):
+        """Touch the X connection: if X is gone, Xlib's I/O error handler exits the process."""
+        self.x.XPending(self.dpy)
 
     def swap(self):
         self.egl.eglSwapBuffers(self.edpy, self.surf)
@@ -589,6 +594,7 @@ def main():
     ip, ip_checked = local_ip(), time.monotonic()
 
     start = time.monotonic()
+    parent, check_t = os.getppid(), start
     frames, stat_t = 0, start
     idx, idx_t = 0, start
     while True:
@@ -617,6 +623,11 @@ def main():
         r.frame(progs[idx], win.size(), scale, t, fade, extra)
         win.swap()
 
+        if now - check_t >= 1:
+            check_t = now
+            if os.getppid() != parent:
+                return  # the server died: don't linger as an orphan
+            win.alive()
         if args.snapshot and now - start >= 3:
             r.snapshot(args.snapshot)
             return
