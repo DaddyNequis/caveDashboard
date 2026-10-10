@@ -70,6 +70,18 @@
   input[type=range] { width: 100%; accent-color: var(--accent); }
   .muted { color: var(--muted); font-size: 13px; }
 
+  .vgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
+  button.vcard { padding: 0; text-align: left; overflow: hidden; font-weight: 400; border-radius: var(--r); background: var(--panel); }
+  button.vcard.active { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+  .vcard canvas, .vcard .thumb { display: block; width: 100%; aspect-ratio: 16 / 9; background: #000; }
+  .vcard .vt { padding: 8px 10px 10px; }
+  .vcard .vn { font-weight: 600; font-size: 14px; }
+  .vcard .vd { color: var(--muted); font-size: 12px; line-height: 1.3; margin-top: 2px; }
+  .thumb { display: grid !important; place-items: center; }
+  .thumb.clock { font-size: 30px; font-weight: 200; color: #eee; text-shadow: 0 0 12px rgba(242,163,58,.6);
+    background: radial-gradient(ellipse at 50% 120%, #1b1d2c, #050507 70%) !important; }
+  .thumb.shuffle { font-size: 30px; background: conic-gradient(from 90deg, #3a1c71, #d76d77, #ffaf7b, #1fa2ff, #12d8fa, #3a1c71) !important; }
+  .note { background: rgba(227,179,65,.1); border: 1px solid rgba(227,179,65,.3); color: var(--warn); border-radius: 10px; padding: 10px 12px; font-size: 13px; }
   .toast { position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%) translateY(80px); background: var(--text); color: var(--bg);
     padding: 10px 16px; border-radius: 10px; font-weight: 600; transition: transform .2s; max-width: calc(100% - 32px); }
   .toast.show { transform: translateX(-50%) translateY(0); }
@@ -91,6 +103,7 @@
 
   <h2>Mostrar en pantalla</h2>
   <form class="card" id="form">
+    <div class="note" id="webNote" hidden>Esta Pi no puede abrir páginas web: su CPU no es compatible con los navegadores actuales. Usa vídeos o visuales.</div>
     <input type="url" id="url" placeholder="https://youtube.com/watch?v=…  ·  https://…/video.mp4  ·  https://mi-dashboard" required autocomplete="off" inputmode="url">
     <div class="seg" role="radiogroup">
       <input type="radio" name="mode" id="m-auto" value="auto" checked><label for="m-auto">Auto</label>
@@ -109,6 +122,9 @@
     </div>
   </form>
 
+  <h2>Visuales</h2>
+  <div class="vgrid" id="vgrid"></div>
+
   <h2>Recientes</h2>
   <div class="card"><ul class="history" id="history"></ul></div>
 
@@ -125,7 +141,22 @@
       <div>Volumen <span class="muted" id="volv"></span></div>
       <input type="range" id="vol" min="0" max="130" step="5">
     </div>
-    <div class="muted">Se aplica al siguiente vídeo que se reproduzca.</div>
+    <div class="muted">Los ajustes de vídeo se aplican al siguiente vídeo.</div>
+    <div class="field">
+      <div>Calidad de visuales<div class="muted">Normal va a 30 FPS en la Pi Zero W</div></div>
+      <select id="vq"><option value="4">Baja</option><option value="3">Normal</option><option value="2">Alta</option></select>
+    </div>
+    <div class="field">
+      <div>Velocidad de visuales <span class="muted" id="vsv"></span></div>
+      <input type="range" id="vs" min="0.25" max="3" step="0.25">
+    </div>
+    <div class="field">
+      <div>Aleatorio cambia cada</div>
+      <select id="cyc">
+        <option value="1">1 min</option><option value="2">2 min</option><option value="5">5 min</option>
+        <option value="10">10 min</option><option value="15">15 min</option><option value="30">30 min</option><option value="60">1 hora</option>
+      </select>
+    </div>
   </div>
 
   <h2>Sistema</h2>
@@ -138,12 +169,22 @@
 
 <script>
 const $ = (id) => document.getElementById(id);
-let state = null, settingsDirty = false;
+let state = null, settingsDirty = false, visualsBuilt = false;
 
 const VIDEO_HOSTS = ["youtube.com", "youtu.be", "youtube-nocookie.com", "vimeo.com", "twitch.tv", "dailymotion.com"];
 const VIDEO_EXT = /\.(mp4|m4v|mkv|webm|mov|avi|ts|m3u8|mpd|mp3|m4a|aac|ogg|opus|flac|wav)$/i;
 
+function labelFor(url) {
+  if (url.startsWith("visual:")) {
+    const id = url.slice(7);
+    const v = (state?.visuals || []).find(v => v.id === id);
+    return "Visual: " + (id === "aleatorio" ? "Aleatorio" : v ? v.name : id);
+  }
+  return url;
+}
+
 function detect(raw) {
+  if (raw.startsWith("visual:")) return "visual";
   try {
     const u = new URL(raw.includes("://") ? raw : "https://" + raw);
     if (/^(rtsps?|rtmps?|srt|udp):$/.test(u.protocol)) return "video";
@@ -183,11 +224,18 @@ function render(s) {
   $("host").textContent = `${s.hostname} · ${s.ip || "sin red"}${s.port === 80 ? "" : ":" + s.port}`;
 
   const pill = $("pill");
-  const labels = { video: "Vídeo", web: "Web", idle: "En espera" };
+  const labels = { video: "Vídeo", web: "Web", visual: "Visual", idle: "En espera" };
   pill.className = "pill " + (p.status === "error" ? "error" : p.kind === "idle" ? "idle" : "playing");
   pill.textContent = p.status === "error" ? "Error" : labels[p.kind] || "…";
   $("since").textContent = p.since ? ago(p.since) : "";
-  $("nowUrl").textContent = p.kind === "idle" || !s.current ? "Nada configurado — la pantalla muestra la IP." : s.current.url;
+  $("nowUrl").textContent = p.kind === "idle" || !s.current ? "Nada configurado: la pantalla muestra el reloj y la IP."
+    : labelFor(s.current.url);
+  $("webNote").hidden = s.web_ok;
+  if (!visualsBuilt) buildVisuals(s.visuals);
+  const activeVisual = p.kind === "visual" && s.current ? s.current.url.slice(7) : null;
+  document.querySelectorAll(".vcard").forEach(c => c.classList.toggle("active", c.dataset.id === activeVisual));
+  const clock = document.querySelector(".thumb.clock");
+  if (clock) clock.textContent = new Date().toTimeString().slice(0, 5);
   $("nowErr").hidden = !p.error; $("nowErr").textContent = p.error || "";
 
   const ul = $("history");
@@ -198,10 +246,11 @@ function render(s) {
   }
   for (const h of s.history) {
     const li = document.createElement("li");
-    const url = document.createElement("span"); url.className = "h-url"; url.textContent = h.url; url.title = "Mostrar ahora";
+    const url = document.createElement("span"); url.className = "h-url"; url.textContent = labelFor(h.url); url.title = "Mostrar ahora";
     url.onclick = () => show(h);
     const tag = document.createElement("span"); tag.className = "tag";
-    tag.textContent = h.mode === "auto" ? (detect(h.url) === "video" ? "vídeo" : "web") : h.mode === "video" ? "vídeo" : "web";
+    const m = h.mode === "auto" ? detect(h.url) : h.mode;
+    tag.textContent = m === "video" ? "vídeo" : m === "visual" ? "visual" : "web";
     const del = document.createElement("button"); del.className = "del"; del.textContent = "×"; del.title = "Quitar";
     del.onclick = async () => { render(await api("/api/history/delete", { url: h.url })); };
     li.append(url, tag, del); ul.append(li);
@@ -210,6 +259,8 @@ function render(s) {
   if (!settingsDirty) {
     $("maxh").value = s.settings.max_height;
     $("vol").value = s.settings.volume; $("volv").textContent = s.settings.volume + "%";
+    $("vq").value = s.settings.visual_quality; $("cyc").value = s.settings.cycle_minutes;
+    $("vs").value = s.settings.visual_speed; $("vsv").textContent = "×" + s.settings.visual_speed;
   }
 }
 
@@ -221,8 +272,8 @@ async function show(item) {
   const btn = $("go"); btn.disabled = true;
   try {
     render(await api("/api/show", item));
-    toast((item.mode === "video" || (item.mode === "auto" && detect(item.url) === "video"))
-      ? "Cargando vídeo… (YouTube puede tardar ~20 s)" : "Abriendo página…");
+    const m = item.mode === "auto" ? detect(item.url) : item.mode;
+    toast(m === "video" ? "Cargando vídeo… (YouTube puede tardar ~20 s)" : m === "visual" ? "Mostrando visual" : "Abriendo página…");
   } catch (e) { toast(e.message, true); }
   finally { btn.disabled = false; }
 }
@@ -257,6 +308,85 @@ async function saveSettings(patch) {
 $("maxh").onchange = () => saveSettings({ max_height: +$("maxh").value });
 $("vol").oninput = () => { settingsDirty = true; $("volv").textContent = $("vol").value + "%"; };
 $("vol").onchange = () => saveSettings({ volume: +$("vol").value });
+$("vq").onchange = () => saveSettings({ visual_quality: +$("vq").value });
+$("cyc").onchange = () => saveSettings({ cycle_minutes: +$("cyc").value });
+$("vs").oninput = () => { settingsDirty = true; $("vsv").textContent = "×" + $("vs").value; };
+$("vs").onchange = () => saveSettings({ visual_speed: +$("vs").value });
+
+// --- Visuals grid with live WebGL previews (same shaders the Pi runs) -----
+function buildVisuals(list) {
+  visualsBuilt = true;
+  const grid = $("vgrid");
+  const cards = [...list, { id: "aleatorio", name: "Aleatorio", desc: "Rota entre todos con un fundido" }];
+  for (const v of cards) {
+    const b = document.createElement("button");
+    b.type = "button"; b.className = "vcard"; b.dataset.id = v.id;
+    let thumb;
+    if (v.id === "reloj" || v.id === "aleatorio") {
+      thumb = document.createElement("div");
+      thumb.className = "thumb " + (v.id === "reloj" ? "clock" : "shuffle");
+      thumb.textContent = v.id === "reloj" ? new Date().toTimeString().slice(0, 5) : "🔀";
+    } else {
+      thumb = document.createElement("canvas"); thumb.width = 192; thumb.height = 108;
+    }
+    const t = document.createElement("div"); t.className = "vt";
+    const n = document.createElement("div"); n.className = "vn"; n.textContent = v.name;
+    const d = document.createElement("div"); d.className = "vd"; d.textContent = v.desc;
+    t.append(n, d); b.append(thumb, t);
+    b.onclick = () => show({ url: "visual:" + v.id, mode: "visual", loop: true, mute: false });
+    grid.append(b);
+  }
+  startPreviews();
+}
+
+async function startPreviews() {
+  let data;
+  try { data = await api("/api/shaders"); } catch { return; }
+  const glc = document.createElement("canvas"); glc.width = 192; glc.height = 108;
+  const gl = glc.getContext("webgl", { antialias: false, preserveDrawingBuffer: true });
+  if (!gl) return;
+  const buf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
+  const compile = (type, src) => {
+    const sh = gl.createShader(type); gl.shaderSource(sh, src); gl.compileShader(sh);
+    if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(sh));
+    return sh;
+  };
+  const items = [];
+  for (const [id, src] of Object.entries(data.shaders)) {
+    const canvas = document.querySelector(`.vcard[data-id="${id}"] canvas`);
+    if (!canvas) continue;
+    try {
+      const prog = gl.createProgram();
+      gl.attachShader(prog, compile(gl.VERTEX_SHADER, data.vert));
+      gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, data.header + src));
+      gl.bindAttribLocation(prog, 0, "a_pos"); gl.linkProgram(prog);
+      const item = { prog, ctx: canvas.getContext("2d"), visible: true,
+        uTime: gl.getUniformLocation(prog, "u_time"), uRes: gl.getUniformLocation(prog, "u_res") };
+      items.push(item);
+      new IntersectionObserver(([e]) => { item.visible = e.isIntersecting; }).observe(canvas);
+    } catch (e) { console.warn(id, e); }
+  }
+  gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+  gl.enableVertexAttribArray(0);
+  gl.viewport(0, 0, 192, 108);
+  const t0 = performance.now();
+  let last = 0;
+  (function loop(now) {
+    requestAnimationFrame(loop);
+    if (now - last < 50) return;  // ~20 fps is plenty for thumbnails
+    last = now;
+    const t = (now - t0) / 1000 * (state?.settings.visual_speed || 1);
+    for (const it of items) {
+      if (!it.visible) continue;
+      gl.useProgram(it.prog);
+      gl.uniform1f(it.uTime, t); gl.uniform2f(it.uRes, 192, 108);
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+      it.ctx.drawImage(glc, 0, 0);
+    }
+  })(0);
+}
 
 for (const action of ["reboot", "poweroff"]) {
   $(action).onclick = async () => {

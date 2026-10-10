@@ -14,21 +14,26 @@ echo "==> Instalando paquetes (tarda un rato en una Pi Zero)"
 apt-get update
 apt-get install -y --no-install-recommends \
   xserver-xorg xserver-xorg-legacy xinit x11-xserver-utils matchbox-window-manager \
-  mpv python3 ca-certificates curl fonts-dejavu-core
+  mpv python3 ca-certificates curl fonts-dejavu-core \
+  libegl1 libegl-mesa0 libgl1-mesa-dri   # GPU visuals (OpenGL ES via EGL)
 
 echo "==> Instalando navegador"
 BROWSER=""
-for pkg in chromium chromium-browser firefox-esr; do
-  if apt-cache show "$pkg" >/dev/null 2>&1 && apt-get install -y --no-install-recommends "$pkg"; then
-    BROWSER="$pkg"; break
-  fi
-done
-[ -n "$BROWSER" ] && echo "    navegador: $BROWSER" || echo "    AVISO: no se pudo instalar navegador; solo funcionarán los vídeos"
+if [ "$(uname -m)" = aarch64 ] || grep -qw neon /proc/cpuinfo; then
+  for pkg in chromium chromium-browser firefox-esr; do
+    if apt-cache show "$pkg" >/dev/null 2>&1 && apt-get install -y --no-install-recommends "$pkg"; then
+      BROWSER="$pkg"; break
+    fi
+  done
+  [ -n "$BROWSER" ] && echo "    navegador: $BROWSER" || echo "    AVISO: no se pudo instalar navegador; solo vídeos y visuales"
+else
+  echo "    CPU sin NEON (Pi Zero/1): los navegadores actuales no funcionan aquí. Se omite; vídeos y visuales sí."
+fi
 
 echo "==> Copiando aplicación a $APP"
 install -d "$APP/bin"
-cp -r "$SRC/server.py" "$SRC/static" "$SRC/kiosk" "$APP/"
-chmod +x "$APP/server.py" "$APP/kiosk/session.sh"
+cp -r "$SRC/server.py" "$SRC/visuals.py" "$SRC/static" "$SRC/kiosk" "$APP/"
+chmod +x "$APP/server.py" "$APP/visuals.py" "$APP/kiosk/session.sh"
 
 echo "==> Descargando yt-dlp"
 curl -fsSL https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o "$APP/bin/yt-dlp"

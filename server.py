@@ -2,8 +2,9 @@
 """Cave Dashboard: kiosk display controller for Raspberry Pi.
 
 Serves a small control panel over HTTP and shows the configured URL full
-screen: video URLs (YouTube, mp4, streams...) are played with mpv, everything
-else is opened in a kiosk browser. Python standard library only.
+screen: video URLs (YouTube, mp4, streams...) are played with mpv, GPU visuals
+(visual:<name>) run with visuals.py, everything else is opened in a kiosk
+browser. Python standard library only.
 """
 
 import json
@@ -14,11 +15,14 @@ import shutil
 import signal
 import socket
 import subprocess
+import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
+
+import visuals
 
 APP_DIR = Path(__file__).resolve().parent
 STATIC_DIR = APP_DIR / "static"
@@ -29,6 +33,8 @@ YTDLP = os.environ.get("CAVE_YTDLP") or str(APP_DIR / "bin/yt-dlp")
 MPV_EXTRA = shlex.split(os.environ.get("CAVE_MPV_ARGS", ""))
 BROWSER_EXTRA = shlex.split(os.environ.get("CAVE_BROWSER_ARGS", ""))
 HISTORY_MAX = 15
+VISUAL_PREFIX = "visual:"
+IDLE_URL = f"http://127.0.0.1:{PORT}/idle"
 
 VIDEO_HOSTS = (
     "youtube.com", "youtu.be", "youtube-nocookie.com", "vimeo.com",
@@ -40,7 +46,8 @@ VIDEO_EXT = (
 )
 STREAM_SCHEMES = ("rtsp", "rtsps", "rtmp", "rtmps", "srt", "udp")
 
-DEFAULT_SETTINGS = {"max_height": 720, "volume": 100}
+DEFAULT_SETTINGS = {"max_height": 720, "volume": 100, "visual_quality": 3, "visual_speed": 1.0, "cycle_minutes": 5}
+VISUAL_SETTINGS = ("visual_quality", "visual_speed", "cycle_minutes")
 
 
 def log(*args):
@@ -57,6 +64,8 @@ def local_ip():
 
 
 def detect_mode(url):
+    if url.startswith(VISUAL_PREFIX):
+        return "visual"
     p = urlparse(url)
     if p.scheme in STREAM_SCHEMES:
         return "video"
@@ -68,8 +77,14 @@ def detect_mode(url):
     return "web"
 
 
+def item_mode(item):
+    return item["mode"] if item["mode"] != "auto" else detect_mode(item["url"])
+
+
 def normalize_url(url):
     url = url.strip()
+    if url.lower().startswith(VISUAL_PREFIX):
+        return url.lower()
     if url and not re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", url):
         if re.match(r"^(javascript|data|file|about|chrome|view-source|blob):", url, re.I):
             raise ValueError("URL no válida (usa http:// o https://)")
@@ -81,6 +96,11 @@ def normalize_url(url):
 
 
 def validate_url(url, mode):
+    if mode == "visual":
+        name = url[len(VISUAL_PREFIX):]
+        if not url.startswith(VISUAL_PREFIX) or (name not in visuals.CATALOG and name != visuals.SHUFFLE):
+            raise ValueError("Visual desconocido")
+        return
     p = urlparse(url)
     allowed = ("http", "https") + (STREAM_SCHEMES if mode != "web" else ())
     try:
@@ -91,10 +111,23 @@ def validate_url(url, mode):
         raise ValueError("URL no válida (usa http:// o https://)")
 
 
+def cpu_has_neon():
+    """Chromium and Firefox need NEON; the Pi Zero/1 (ARMv6) lacks it."""
+    machine = os.uname().machine
+    if not machine.startswith("arm"):
+        return True  # aarch64 always has it; x86 dev machines don't need it
+    try:
+        return bool(re.search(r"^Features\s*:.*\bneon\b", Path("/proc/cpuinfo").read_text(), re.M))
+    except OSError:
+        return True
+
+
 def find_browser():
     custom = os.environ.get("CAVE_BROWSER")
     if custom:
         return custom
+    if not cpu_has_neon():
+        return None
     for name in ("chromium-browser", "chromium", "firefox-esr", "firefox"):
         path = shutil.which(name)
         if path:
@@ -143,17 +176,19 @@ class State:
 
 
 class Player:
-    """Owns the single process (browser or mpv) currently on screen."""
+    """Owns the single process (browser, mpv or visuals) currently on screen."""
 
     def __init__(self, state):
         self.state = state
         self.proc = None
-        self.kind = None  # "web" | "video" | "idle"
+        self.kind = None  # what is shown: "web" | "video" | "visual" | "idle"
+        self.backend = None  # what shows it: "browser" | "mpv" | "visuals"
         self.status = "starting"
         self.error = None
         self.since = time.time()
         self.lock = threading.RLock()
         self.browser = find_browser()
+        self.visuals_ok = True
         self.crashes = 0
 
     # --- public -----------------------------------------------------------
@@ -163,17 +198,13 @@ class Player:
             self._stop_proc()
             self.error = None
             self.crashes = 0
-            mode = item["mode"] if item["mode"] != "auto" else detect_mode(item["url"])
-            if mode == "video":
-                self._start_video(item)
-            else:
-                self._start_browser(item["url"], "web")
+            self._launch(item)
 
     def idle(self, error=None):
         with self.lock:
             self._stop_proc()
             self.error = error
-            self._start_browser(f"http://127.0.0.1:{PORT}/idle", "idle")
+            self._start_idle()
 
     def restore(self):
         if self.state.current:
@@ -181,16 +212,44 @@ class Player:
         else:
             self.idle()
 
+    def refresh_visual(self):
+        """Apply changed visual settings to whatever visual is on screen."""
+        with self.lock:
+            if self.backend != "visuals" or not self.proc:
+                return
+            kind = self.kind
+            self._stop_proc()
+            if kind == "idle" or not self.state.current:
+                self._start_idle()
+            else:
+                self._launch(self.state.current)
+
     def shutdown(self):
         with self.lock:
             self._stop_proc()
 
     def info(self):
-        return {"kind": self.kind, "status": self.status, "error": self.error, "since": self.since}
+        return {"kind": self.kind, "backend": self.backend, "status": self.status, "error": self.error,
+                "since": self.since}
 
     # --- internals --------------------------------------------------------
 
-    def _spawn(self, cmd, kind, logname):
+    def _launch(self, item):
+        mode = item_mode(item)
+        if mode == "video":
+            self._start_video(item)
+        elif mode == "visual":
+            self._start_visual(item["url"][len(VISUAL_PREFIX):], "visual")
+        else:
+            self._start_browser(item["url"], "web")
+
+    def _start_idle(self):
+        if self.visuals_ok:
+            self._start_visual("reloj", "idle")
+        else:
+            self._start_browser(IDLE_URL, "idle")
+
+    def _spawn(self, cmd, kind, backend, logname):
         DATA_DIR.mkdir(parents=True, exist_ok=True)
         logf = open(DATA_DIR / logname, "w")
         log("exec:", " ".join(shlex.quote(c) for c in cmd))
@@ -199,11 +258,20 @@ class Player:
                                     start_new_session=True)
         except OSError as e:
             logf.close()
-            self.kind, self.status, self.error = kind, "error", f"No se pudo lanzar {cmd[0]}: {e}"
+            self.kind, self.backend, self.status = kind, backend, "error"
+            self.error = f"No se pudo lanzar {cmd[0]}: {e}"
             return
         logf.close()
-        self.proc, self.kind, self.status, self.since = proc, kind, "playing", time.time()
-        threading.Thread(target=self._watch, args=(proc, kind, logname), daemon=True).start()
+        self.proc, self.kind, self.backend, self.status, self.since = proc, kind, backend, "playing", time.time()
+        threading.Thread(target=self._watch, args=(proc, kind, backend, logname, time.monotonic()),
+                         daemon=True).start()
+
+    def _start_visual(self, name, kind):
+        s = self.state.settings
+        cmd = [sys.executable, str(APP_DIR / "visuals.py"),
+               "--scale", str(int(s["visual_quality"])), "--speed", str(float(s["visual_speed"])),
+               "--cycle", str(int(s["cycle_minutes"]) * 60), name]
+        self._spawn(cmd, kind, "visuals", "visuals.log")
 
     def _start_video(self, item):
         s = self.state.settings
@@ -224,12 +292,14 @@ class Player:
         if item.get("mute"):
             cmd.append("--mute=yes")
         cmd += MPV_EXTRA + ["--", item["url"]]
-        self._spawn(cmd, "video", "mpv.log")
+        self._spawn(cmd, "video", "mpv", "mpv.log")
 
     def _start_browser(self, url, kind):
         if not self.browser:
-            self.kind, self.status = kind, "error"
-            self.error = "No hay navegador instalado (chromium o firefox)"
+            self.kind, self.backend, self.status = kind, "browser", "error"
+            self.error = ("Este equipo no puede abrir páginas web (su CPU no es compatible con los navegadores "
+                          "actuales). Usa vídeos o visuales." if not cpu_has_neon()
+                          else "No hay navegador instalado (chromium o firefox)")
             return
         profile = DATA_DIR / "browser"
         profile.mkdir(parents=True, exist_ok=True)
@@ -250,7 +320,7 @@ class Player:
             if size:
                 cmd.append(f"--window-size={size[0]},{size[1]}")
         cmd += BROWSER_EXTRA + [url]
-        self._spawn(cmd, kind, "browser.log")
+        self._spawn(cmd, kind, "browser", "browser.log")
 
     @staticmethod
     def _clear_chromium_crash_flag(profile):
@@ -276,31 +346,41 @@ class Player:
         except ProcessLookupError:
             pass
 
-    def _watch(self, proc, kind, logname):
+    def _watch(self, proc, kind, backend, logname, started):
         code = proc.wait()
         with self.lock:
             if proc is not self.proc:
                 return  # stopped on purpose
             self.proc = None
-            log(f"{kind} exited with code {code}")
-            if kind == "video":
+            log(f"{backend} ({kind}) exited with code {code}")
+            if backend == "mpv":
                 if code == 0:
                     self.idle()
                 else:
                     self.idle(error=f"No se pudo reproducir el vídeo: {self._tail(logname)}")
                 return
-            # Browser died unexpectedly: restart with backoff.
+            if backend == "visuals" and code != 0 and time.monotonic() - started < 15:
+                # Failed right away: no usable GPU/display for visuals.
+                msg = f"No se pudieron iniciar los visuales: {self._tail(logname)}"
+                if kind == "idle":
+                    self.visuals_ok = False
+                    self.error = msg
+                    self._start_idle()
+                else:
+                    self.idle(error=msg)
+                return
+            # Died after running for a while: restart with backoff.
             self.crashes += 1
             self.status = "error"
-            self.error = f"El navegador se cerró (código {code}), reiniciando…"
-        delay = min(60, 3 * self.crashes)
-        time.sleep(delay)
+            what = "Los visuales se cerraron" if backend == "visuals" else "El navegador se cerró"
+            self.error = f"{what} (código {code}), reiniciando…"
+        time.sleep(min(60, 3 * self.crashes))
         with self.lock:
             if self.proc is None and self.status == "error" and self.kind == kind:
                 if kind == "idle" or not self.state.current:
-                    self._start_browser(f"http://127.0.0.1:{PORT}/idle", "idle")
+                    self._start_idle()
                 else:
-                    self._start_browser(self.state.current["url"], "web")
+                    self._launch(self.state.current)
 
     @staticmethod
     def _tail(logname):
@@ -375,6 +455,8 @@ class Handler(BaseHTTPRequestHandler):
                 "settings": st.settings,
                 "player": pl.info(),
                 "browser": pl.browser,
+                "web_ok": bool(pl.browser),
+                "visuals": [{"id": k, "name": n, "desc": d} for k, (n, d) in visuals.CATALOG.items()],
                 "ip": local_ip(),
                 "port": PORT,
                 "hostname": socket.gethostname(),
@@ -390,6 +472,9 @@ class Handler(BaseHTTPRequestHandler):
             self._file("idle.html")
         elif path == "/api/status":
             self._send(200, self._status())
+        elif path == "/api/shaders":
+            self._send(200, {"vert": visuals.VERT, "header": visuals.HEADER,
+                             "shaders": {k: v for k, v in visuals.SHADERS.items() if k != "reloj"}})
         else:
             self._send(404, {"error": "not found"})
 
@@ -423,8 +508,10 @@ class Handler(BaseHTTPRequestHandler):
     def _show(self, body):
         url = normalize_url(str(body.get("url", "")))
         mode = body.get("mode", "auto")
-        if mode not in ("auto", "web", "video"):
+        if mode not in ("auto", "web", "video", "visual"):
             raise ValueError("Modo no válido")
+        if url.startswith(VISUAL_PREFIX):
+            mode = "visual"
         validate_url(url, mode if mode != "auto" else detect_mode(url))
         item = {"url": url, "mode": mode, "loop": bool(body.get("loop", True)), "mute": bool(body.get("mute"))}
         with self.state.lock:
@@ -442,7 +529,18 @@ class Handler(BaseHTTPRequestHandler):
                 self.state.settings["max_height"] = h
             if "volume" in body:
                 self.state.settings["volume"] = max(0, min(130, int(body["volume"])))
+            if "visual_quality" in body:
+                q = int(body["visual_quality"])
+                if q not in (2, 3, 4):
+                    raise ValueError("Calidad no válida")
+                self.state.settings["visual_quality"] = q
+            if "visual_speed" in body:
+                self.state.settings["visual_speed"] = round(max(0.25, min(3.0, float(body["visual_speed"]))), 2)
+            if "cycle_minutes" in body:
+                self.state.settings["cycle_minutes"] = max(1, min(120, int(body["cycle_minutes"])))
             self.state.save()
+        if any(k in body for k in VISUAL_SETTINGS):
+            self.player.refresh_visual()
 
     def _system(self, action):
         cmds = {"reboot": ["sudo", "-n", "/usr/bin/systemctl", "reboot"],
